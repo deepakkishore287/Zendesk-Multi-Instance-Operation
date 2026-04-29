@@ -1,0 +1,137 @@
+##############################################################################
+# .github/workflows/deploy.yml
+#
+# CI/CD Pipeline for Zendesk-Multi-Instance-Operation
+#
+# Triggered on: push to master branch
+#
+# Pipeline stages:
+#   1. build   — install deps, lint, build frontend
+#   2. deploy  — SSH into Linux VM, pull latest code, restart app via PM2
+##############################################################################
+
+name: Build & Deploy to Azure Linux VM
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch: # allow manual trigger from GitHub UI
+
+env:
+  NODE_VERSION: "20"
+  DEPLOY_PATH: "/home/azureuser/app/Zendesk-Multi-Instance-Operation"
+  PM2_APP_NAME: "zendesk-app"
+
+jobs:
+  # ── Job 1: Build ────────────────────────────────────────────────────────────
+  build:
+    name: Install & Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install root dependencies
+        run: npm install
+
+      - name: Install backend dependencies
+        run: cd backend && npm install
+
+      - name: Install frontend dependencies
+        run: cd frontend && npm install
+
+      - name: Build frontend
+        run: cd frontend && npm run build
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/dist/   # adjust if your build output is different
+          retention-days: 1
+
+  # ── Job 2: Deploy ───────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to Linux VM
+    runs-on: ubuntu-latest
+    needs: build  # only deploy if build succeeds
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download frontend build
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/dist/
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/azure_vm_rsa
+          chmod 600 ~/.ssh/azure_vm_rsa
+          ssh-keyscan -H ${{ secrets.VM_IP }} >> ~/.ssh/known_hosts
+
+      - name: Create deploy directory on VM
+        run: |
+          ssh -i ~/.ssh/azure_vm_rsa azureuser@${{ secrets.VM_IP }} \
+            "mkdir -p ${{ env.DEPLOY_PATH }}"
+
+      - name: Copy code to VM
+        run: |
+          rsync -avz --delete \
+            --exclude='.git' \
+            --exclude='node_modules' \
+            --exclude='.env' \
+            -e "ssh -i ~/.ssh/azure_vm_rsa" \
+            ./ azureuser@${{ secrets.VM_IP }}:${{ env.DEPLOY_PATH }}/
+
+      - name: Install dependencies & start app on VM
+        run: |
+          ssh -i ~/.ssh/azure_vm_rsa azureuser@${{ secrets.VM_IP }} << 'EOF'
+            set -e
+
+            # Install Node.js if not present
+            if ! command -v node &> /dev/null; then
+              curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+              sudo apt-get install -y nodejs
+            fi
+
+            # Install PM2 globally if not present
+            if ! command -v pm2 &> /dev/null; then
+              sudo npm install -g pm2
+            fi
+
+            cd /home/azureuser/app/Zendesk-Multi-Instance-Operation
+
+            # Install dependencies
+            npm install --production
+            cd backend && npm install --production && cd ..
+
+            # Start or restart app with PM2
+            pm2 describe zendesk-app > /dev/null 2>&1 \
+              && pm2 restart zendesk-app \
+              || pm2 start ecosystem.config.js
+
+            # Save PM2 process list (auto-restart on reboot)
+            pm2 save
+
+            # Enable PM2 on system startup (first time only)
+            sudo pm2 startup systemd -u azureuser --hp /home/azureuser || true
+
+            echo "✅ Deployment complete!"
+          EOF
+
+      - name: Verify app is running
+        run: |
+          ssh -i ~/.ssh/azure_vm_rsa azureuser@${{ secrets.VM_IP }} \
+            "pm2 status"
