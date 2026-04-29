@@ -3,37 +3,79 @@
 #
 # CI/CD Pipeline for Zendesk-Multi-Instance-Operation
 #
-# Triggered on: push to master branch
+# Branch strategy:
+#   dev    branch → dev environment    (port 3001, /etc/nginx/sites-available/zendesk-dev)
+#   master branch → production environment (port 3000, /etc/nginx/sites-available/zendesk)
 #
-# Pipeline stages:
-#   1. build   — install deps, lint, build frontend
-#   2. deploy  — SSH into Linux VM, pull latest code, restart app via PM2
+# Secrets required (Settings → Secrets → Actions):
+#   SSH_PRIVATE_KEY  — contents of azure_vm_rsa
+#   VM_IP            — 20.207.206.142
 ##############################################################################
 
-name: Build & Deploy to Azure Linux VM
+name: Build & Deploy
 
 on:
   push:
     branches:
       - master
-  workflow_dispatch: # allow manual trigger from GitHub UI
+      - dev
+  workflow_dispatch:
 
 env:
   NODE_VERSION: "20"
-  DEPLOY_PATH: "/home/azureuser/app/Zendesk-Multi-Instance-Operation"
-  PM2_APP_NAME: "zendesk-app"
 
 jobs:
-  # ── Job 1: Build ────────────────────────────────────────────────────────────
+  # ── Job 1: Set environment variables based on branch ────────────────────────
+  setup:
+    name: Set Deploy Environment
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.vars.outputs.environment }}
+      deploy_path: ${{ steps.vars.outputs.deploy_path }}
+      app_port: ${{ steps.vars.outputs.app_port }}
+      pm2_name: ${{ steps.vars.outputs.pm2_name }}
+      nginx_site: ${{ steps.vars.outputs.nginx_site }}
+      nginx_port: ${{ steps.vars.outputs.nginx_port }}
+
+    steps:
+      - name: Set variables by branch
+        id: vars
+        run: |
+          if [[ "${{ github.ref_name }}" == "master" ]]; then
+            echo "environment=production"   >> $GITHUB_OUTPUT
+            echo "deploy_path=/home/azureuser/app/zendesk-prod" >> $GITHUB_OUTPUT
+            echo "app_port=3000"            >> $GITHUB_OUTPUT
+            echo "pm2_name=zendesk-prod"    >> $GITHUB_OUTPUT
+            echo "nginx_site=zendesk-prod"  >> $GITHUB_OUTPUT
+            echo "nginx_port=80"            >> $GITHUB_OUTPUT
+          else
+            echo "environment=dev"          >> $GITHUB_OUTPUT
+            echo "deploy_path=/home/azureuser/app/zendesk-dev" >> $GITHUB_OUTPUT
+            echo "app_port=3001"            >> $GITHUB_OUTPUT
+            echo "pm2_name=zendesk-dev"     >> $GITHUB_OUTPUT
+            echo "nginx_site=zendesk-dev"   >> $GITHUB_OUTPUT
+            echo "nginx_port=8080"          >> $GITHUB_OUTPUT
+          fi
+
+      - name: Print deploy target
+        run: |
+          echo "🚀 Deploying branch '${{ github.ref_name }}'"
+          echo "   Environment : ${{ steps.vars.outputs.environment }}"
+          echo "   Deploy path : ${{ steps.vars.outputs.deploy_path }}"
+          echo "   App port    : ${{ steps.vars.outputs.app_port }}"
+          echo "   Nginx port  : ${{ steps.vars.outputs.nginx_port }}"
+
+  # ── Job 2: Build ────────────────────────────────────────────────────────────
   build:
     name: Install & Build
     runs-on: ubuntu-latest
+    needs: setup
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -48,21 +90,29 @@ jobs:
       - name: Install frontend dependencies
         run: cd frontend && npm install
 
-      - name: Build frontend
+      - name: Build frontend (Vite)
         run: cd frontend && npm run build
 
-      - name: Upload build artifact
+      - name: Upload frontend build
         uses: actions/upload-artifact@v4
         with:
-          name: frontend-build
-          path: frontend/dist/   # adjust if your build output is different
+          name: frontend-dist-${{ github.ref_name }}
+          path: frontend/dist/
           retention-days: 1
 
-  # ── Job 2: Deploy ───────────────────────────────────────────────────────────
+  # ── Job 3: Deploy ───────────────────────────────────────────────────────────
   deploy:
-    name: Deploy to Linux VM
+    name: Deploy to ${{ needs.setup.outputs.environment }}
     runs-on: ubuntu-latest
-    needs: build  # only deploy if build succeeds
+    needs: [setup, build]
+    environment: ${{ needs.setup.outputs.environment }}  # links to GitHub Environments
+
+    env:
+      DEPLOY_PATH: ${{ needs.setup.outputs.deploy_path }}
+      APP_PORT: ${{ needs.setup.outputs.app_port }}
+      PM2_NAME: ${{ needs.setup.outputs.pm2_name }}
+      NGINX_SITE: ${{ needs.setup.outputs.nginx_site }}
+      NGINX_PORT: ${{ needs.setup.outputs.nginx_port }}
 
     steps:
       - name: Checkout code
@@ -71,10 +121,10 @@ jobs:
       - name: Download frontend build
         uses: actions/download-artifact@v4
         with:
-          name: frontend-build
+          name: frontend-dist-${{ github.ref_name }}
           path: frontend/dist/
 
-      - name: Setup SSH key
+      - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/azure_vm_rsa
@@ -86,52 +136,103 @@ jobs:
           ssh -i ~/.ssh/azure_vm_rsa azureuser@${{ secrets.VM_IP }} \
             "mkdir -p ${{ env.DEPLOY_PATH }}"
 
-      - name: Copy code to VM
+      - name: Sync code to VM
         run: |
           rsync -avz --delete \
             --exclude='.git' \
             --exclude='node_modules' \
+            --exclude='backend/node_modules' \
+            --exclude='frontend/node_modules' \
             --exclude='.env' \
             -e "ssh -i ~/.ssh/azure_vm_rsa" \
             ./ azureuser@${{ secrets.VM_IP }}:${{ env.DEPLOY_PATH }}/
 
-      - name: Install dependencies & start app on VM
+      - name: Setup Node.js & tools on VM (first time)
         run: |
-          ssh -i ~/.ssh/azure_vm_rsa azureuser@${{ secrets.VM_IP }} << 'EOF'
+          ssh -i ~/.ssh/azure_vm_rsa azureuser@${{ secrets.VM_IP }} << 'ENDSSH'
             set -e
-
-            # Install Node.js if not present
-            if ! command -v node &> /dev/null; then
+            if ! node -v 2>/dev/null | grep -q "v20"; then
               curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
               sudo apt-get install -y nodejs
             fi
+            command -v pm2  &>/dev/null || sudo npm install -g pm2
+            command -v nginx &>/dev/null || sudo apt-get install -y nginx
+            echo "Node: $(node -v) | PM2: $(pm2 -v) | Nginx: $(nginx -v 2>&1)"
+          ENDSSH
 
-            # Install PM2 globally if not present
-            if ! command -v pm2 &> /dev/null; then
-              sudo npm install -g pm2
-            fi
-
-            cd /home/azureuser/app/Zendesk-Multi-Instance-Operation
-
-            # Install dependencies
-            npm install --production
-            cd backend && npm install --production && cd ..
-
-            # Start or restart app with PM2
-            pm2 describe zendesk-app > /dev/null 2>&1 \
-              && pm2 restart zendesk-app \
-              || pm2 start ecosystem.config.js
-
-            # Save PM2 process list (auto-restart on reboot)
-            pm2 save
-
-            # Enable PM2 on system startup (first time only)
-            sudo pm2 startup systemd -u azureuser --hp /home/azureuser || true
-
-            echo "✅ Deployment complete!"
-          EOF
-
-      - name: Verify app is running
+      - name: Install backend dependencies on VM
         run: |
           ssh -i ~/.ssh/azure_vm_rsa azureuser@${{ secrets.VM_IP }} \
-            "pm2 status"
+            "cd ${{ env.DEPLOY_PATH }}/backend && npm install --omit=dev && npm install cross-env"
+
+      - name: Configure Nginx for ${{ needs.setup.outputs.environment }}
+        run: |
+          ssh -i ~/.ssh/azure_vm_rsa azureuser@${{ secrets.VM_IP }} \
+            DEPLOY_PATH="${{ env.DEPLOY_PATH }}" \
+            NGINX_PORT="${{ env.NGINX_PORT }}" \
+            NGINX_SITE="${{ env.NGINX_SITE }}" \
+            APP_PORT="${{ env.APP_PORT }}" \
+            'bash -s' << 'ENDSSH'
+            sudo tee /etc/nginx/sites-available/$NGINX_SITE > /dev/null << NGINX
+          server {
+              listen $NGINX_PORT;
+              server_name _;
+
+              root $DEPLOY_PATH/frontend/dist;
+              index index.html;
+
+              location / {
+                  try_files \$uri \$uri/ /index.html;
+              }
+
+              location /api/ {
+                  proxy_pass http://localhost:$APP_PORT;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade \$http_upgrade;
+                  proxy_set_header Connection 'upgrade';
+                  proxy_set_header Host \$host;
+                  proxy_cache_bypass \$http_upgrade;
+              }
+          }
+          NGINX
+            sudo ln -sf /etc/nginx/sites-available/$NGINX_SITE /etc/nginx/sites-enabled/
+            sudo rm -f /etc/nginx/sites-enabled/default
+            sudo nginx -t && sudo systemctl reload nginx
+          ENDSSH
+
+      - name: Start or restart backend with PM2
+        run: |
+          ssh -i ~/.ssh/azure_vm_rsa azureuser@${{ secrets.VM_IP }} \
+            DEPLOY_PATH="${{ env.DEPLOY_PATH }}" \
+            APP_PORT="${{ env.APP_PORT }}" \
+            PM2_NAME="${{ env.PM2_NAME }}" \
+            'bash -s' << 'ENDSSH'
+            set -e
+            cd $DEPLOY_PATH
+
+            if pm2 describe $PM2_NAME > /dev/null 2>&1; then
+              pm2 restart $PM2_NAME
+            else
+              pm2 start backend/src/index.js \
+                --name $PM2_NAME \
+                --cwd $DEPLOY_PATH/backend \
+                --env production \
+                -- \
+                2>/dev/null || true
+              pm2 start ecosystem.config.js --only $PM2_NAME 2>/dev/null || \
+              PORT=$APP_PORT NODE_EXTRA_CA_CERTS=./TescoRootCA.pem \
+                pm2 start backend/src/index.js \
+                --name $PM2_NAME \
+                --cwd $DEPLOY_PATH/backend
+            fi
+
+            pm2 save
+            sudo pm2 startup systemd -u azureuser --hp /home/azureuser 2>/dev/null || true
+            echo "✅ $PM2_NAME deployed on port $APP_PORT"
+            pm2 status
+          ENDSSH
+
+      - name: Verify deployment
+        run: |
+          ssh -i ~/.ssh/azure_vm_rsa azureuser@${{ secrets.VM_IP }} \
+            "curl -s -o /dev/null -w 'HTTP %{http_code}' http://localhost:${{ env.APP_PORT }} && echo ' ✅'"
