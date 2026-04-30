@@ -152,13 +152,23 @@ jobs:
         run: |
           ssh -i ~/.ssh/azure_vm_rsa azureuser@${{ secrets.VM_IP }} << 'ENDSSH'
             set -e
+
+            # Wait for any existing apt/dpkg locks to release
+            while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
+              echo "Waiting for dpkg lock to release..."
+              sleep 5
+            done
+
+            # Also wait for unattended-upgrades to finish
+            sudo systemctl stop unattended-upgrades 2>/dev/null || true
+
             if ! node -v 2>/dev/null | grep -q "v20"; then
               curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-              sudo apt-get install -y nodejs
+              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
             fi
             command -v pm2  &>/dev/null || sudo npm install -g pm2
-            command -v nginx &>/dev/null || sudo apt-get install -y nginx
-            echo "Node: $(node -v) | PM2: $(pm2 -v) | Nginx: $(nginx -v 2>&1)"
+            command -v nginx &>/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nginx
+            echo "Node: $(node -v) | PM2: $(pm2 -v)"
           ENDSSH
 
       - name: Install backend dependencies on VM
