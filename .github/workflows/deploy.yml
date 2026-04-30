@@ -214,6 +214,16 @@ jobs:
             sudo nginx -t && sudo systemctl reload nginx
           ENDSSH
 
+      - name: Fix frontend permissions for Nginx
+        run: |
+          ssh -i ~/.ssh/azure_vm_rsa azureuser@${{ secrets.VM_IP }} << 'ENDSSH'
+            sudo chmod o+x /home/azureuser
+            sudo chmod o+x /home/azureuser/app
+            sudo chmod o+x /home/azureuser/app/${{ env.PM2_NAME }}
+            sudo chmod o+x /home/azureuser/app/${{ env.PM2_NAME }}/frontend
+            sudo chmod -R o+r /home/azureuser/app/${{ env.PM2_NAME }}/frontend/dist
+          ENDSSH
+
       - name: Start or restart backend with PM2
         run: |
           ssh -i ~/.ssh/azure_vm_rsa azureuser@${{ secrets.VM_IP }} \
