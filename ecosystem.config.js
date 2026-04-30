@@ -17,7 +17,7 @@ export default {
       max_memory_restart: "500M",
       env: {
         NODE_ENV: "production",
-        PORT: 4000,
+        PORT: 4001,
         NODE_EXTRA_CA_CERTS: "./TescoRootCA.pem",
       },
     },
@@ -33,7 +33,7 @@ export default {
       max_memory_restart: "300M",
       env: {
         NODE_ENV: "development",
-        PORT: 4001,
+        PORT: 4000,
         NODE_EXTRA_CA_CERTS: "./TescoRootCA.pem",
       },
     },
