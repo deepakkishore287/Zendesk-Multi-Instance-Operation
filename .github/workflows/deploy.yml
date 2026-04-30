@@ -44,14 +44,14 @@ jobs:
           if [[ "${{ github.ref_name }}" == "master" ]]; then
             echo "environment=production"   >> $GITHUB_OUTPUT
             echo "deploy_path=/home/azureuser/app/zendesk-prod" >> $GITHUB_OUTPUT
-            echo "app_port=3000"            >> $GITHUB_OUTPUT
+            echo "app_port=4000"            >> $GITHUB_OUTPUT
             echo "pm2_name=zendesk-prod"    >> $GITHUB_OUTPUT
             echo "nginx_site=zendesk-prod"  >> $GITHUB_OUTPUT
             echo "nginx_port=80"            >> $GITHUB_OUTPUT
           else
             echo "environment=dev"          >> $GITHUB_OUTPUT
             echo "deploy_path=/home/azureuser/app/zendesk-dev" >> $GITHUB_OUTPUT
-            echo "app_port=3001"            >> $GITHUB_OUTPUT
+            echo "app_port=4001"            >> $GITHUB_OUTPUT
             echo "pm2_name=zendesk-dev"     >> $GITHUB_OUTPUT
             echo "nginx_site=zendesk-dev"   >> $GITHUB_OUTPUT
             echo "nginx_port=8080"          >> $GITHUB_OUTPUT
@@ -73,10 +73,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
 
       - name: Setup Node.js ${{ env.NODE_VERSION }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v4.4.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: "npm"
@@ -94,7 +94,7 @@ jobs:
         run: cd frontend && npm run build
 
       - name: Upload frontend build
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: frontend-dist-${{ github.ref_name }}
           path: frontend/dist/
@@ -116,10 +116,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
 
       - name: Download frontend build
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v4.3.0
         with:
           name: frontend-dist-${{ github.ref_name }}
           path: frontend/dist/
@@ -129,7 +129,8 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/azure_vm_rsa
           chmod 600 ~/.ssh/azure_vm_rsa
-          ssh-keyscan -H ${{ secrets.VM_IP }} >> ~/.ssh/known_hosts
+          ssh-keyscan -H ${{ secrets.VM_IP }} >> ~/.ssh/known_hosts 2>/dev/null || true
+          ls -la ~/.ssh
 
       - name: Create deploy directory on VM
         run: |
@@ -151,13 +152,26 @@ jobs:
         run: |
           ssh -i ~/.ssh/azure_vm_rsa azureuser@${{ secrets.VM_IP }} << 'ENDSSH'
             set -e
-            if ! node -v 2>/dev/null | grep -q "v20"; then
-              curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-              sudo apt-get install -y nodejs
-            fi
-            command -v pm2  &>/dev/null || sudo npm install -g pm2
-            command -v nginx &>/dev/null || sudo apt-get install -y nginx
-            echo "Node: $(node -v) | PM2: $(pm2 -v) | Nginx: $(nginx -v 2>&1)"
+
+            # Wait for dpkg lock
+            while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
+              echo "Waiting for dpkg lock..."
+              sleep 5
+            done
+            sudo systemctl stop unattended-upgrades 2>/dev/null || true
+
+            # Remove old Node.js 12 and conflicting packages
+            sudo DEBIAN_FRONTEND=noninteractive apt-get remove -y nodejs libnode-dev libnode72 2>/dev/null || true
+            sudo DEBIAN_FRONTEND=noninteractive apt-get autoremove -y 2>/dev/null || true
+
+            # Install Node.js 20
+            curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
+
+            command -v pm2   &>/dev/null || sudo npm install -g pm2
+            command -v nginx &>/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nginx
+
+            echo "Node: $(node -v) | NPM: $(npm -v) | PM2: $(pm2 -v)"
           ENDSSH
 
       - name: Install backend dependencies on VM
@@ -200,6 +214,16 @@ jobs:
             sudo nginx -t && sudo systemctl reload nginx
           ENDSSH
 
+      - name: Fix frontend permissions for Nginx
+        run: |
+          ssh -i ~/.ssh/azure_vm_rsa azureuser@${{ secrets.VM_IP }} << 'ENDSSH'
+            sudo chmod o+x /home/azureuser
+            sudo chmod o+x /home/azureuser/app
+            sudo chmod o+x /home/azureuser/app/${{ env.PM2_NAME }}
+            sudo chmod o+x /home/azureuser/app/${{ env.PM2_NAME }}/frontend
+            sudo chmod -R o+r /home/azureuser/app/${{ env.PM2_NAME }}/frontend/dist
+          ENDSSH
+
       - name: Start or restart backend with PM2
         run: |
           ssh -i ~/.ssh/azure_vm_rsa azureuser@${{ secrets.VM_IP }} \
@@ -208,24 +232,21 @@ jobs:
             PM2_NAME="${{ env.PM2_NAME }}" \
             'bash -s' << 'ENDSSH'
             set -e
-            cd $DEPLOY_PATH
+            cd $DEPLOY_PATH/backend
 
             if pm2 describe $PM2_NAME > /dev/null 2>&1; then
               pm2 restart $PM2_NAME
             else
-              if [ -f ecosystem.config.js ]; then
-                pm2 start ecosystem.config.js --only $PM2_NAME
-              else
-                PORT=$APP_PORT NODE_EXTRA_CA_CERTS=./TescoRootCA.pem \
-                  pm2 start backend/src/index.js \
-                  --name $PM2_NAME \
-                  --cwd $DEPLOY_PATH/backend
-              fi
+              PORT=$APP_PORT \
+              NODE_EXTRA_CA_CERTS=./TescoRootCA.pem \
+              pm2 start src/index.js \
+                --name $PM2_NAME \
+                --cwd $DEPLOY_PATH/backend
             fi
 
             pm2 save
             sudo pm2 startup systemd -u azureuser --hp /home/azureuser 2>/dev/null || true
-            echo "✅ $PM2_NAME deployed on port $APP_PORT"
+            echo "✅ $PM2_NAME running on port $APP_PORT"
             pm2 status
           ENDSSH
           
