@@ -1,7 +1,7 @@
 // src/api/client.js
 import axios from 'axios'
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://20.207.206.142:4001'
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://20.207.206.142:4000'
 
 // Build a querystring from an object (kept same as your original)
 function qs(params = {}) {
