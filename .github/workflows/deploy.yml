@@ -44,14 +44,14 @@ jobs:
           if [[ "${{ github.ref_name }}" == "master" ]]; then
             echo "environment=production"   >> $GITHUB_OUTPUT
             echo "deploy_path=/home/azureuser/app/zendesk-prod" >> $GITHUB_OUTPUT
-            echo "app_port=3000"            >> $GITHUB_OUTPUT
+            echo "app_port=4000"            >> $GITHUB_OUTPUT
             echo "pm2_name=zendesk-prod"    >> $GITHUB_OUTPUT
             echo "nginx_site=zendesk-prod"  >> $GITHUB_OUTPUT
             echo "nginx_port=80"            >> $GITHUB_OUTPUT
           else
             echo "environment=dev"          >> $GITHUB_OUTPUT
             echo "deploy_path=/home/azureuser/app/zendesk-dev" >> $GITHUB_OUTPUT
-            echo "app_port=3001"            >> $GITHUB_OUTPUT
+            echo "app_port=4001"            >> $GITHUB_OUTPUT
             echo "pm2_name=zendesk-dev"     >> $GITHUB_OUTPUT
             echo "nginx_site=zendesk-dev"   >> $GITHUB_OUTPUT
             echo "nginx_port=8080"          >> $GITHUB_OUTPUT
