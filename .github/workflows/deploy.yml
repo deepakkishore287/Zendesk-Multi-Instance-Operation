@@ -222,24 +222,21 @@ jobs:
             PM2_NAME="${{ env.PM2_NAME }}" \
             'bash -s' << 'ENDSSH'
             set -e
-            cd $DEPLOY_PATH
+            cd $DEPLOY_PATH/backend
 
             if pm2 describe $PM2_NAME > /dev/null 2>&1; then
               pm2 restart $PM2_NAME
             else
-              if [ -f ecosystem.config.js ]; then
-                pm2 start ecosystem.config.js --only $PM2_NAME
-              else
-                PORT=$APP_PORT NODE_EXTRA_CA_CERTS=./TescoRootCA.pem \
-                  pm2 start backend/src/index.js \
-                  --name $PM2_NAME \
-                  --cwd $DEPLOY_PATH/backend
-              fi
+              PORT=$APP_PORT \
+              NODE_EXTRA_CA_CERTS=./TescoRootCA.pem \
+              pm2 start src/index.js \
+                --name $PM2_NAME \
+                --cwd $DEPLOY_PATH/backend
             fi
 
             pm2 save
             sudo pm2 startup systemd -u azureuser --hp /home/azureuser 2>/dev/null || true
-            echo "✅ $PM2_NAME deployed on port $APP_PORT"
+            echo "✅ $PM2_NAME running on port $APP_PORT"
             pm2 status
           ENDSSH
           
