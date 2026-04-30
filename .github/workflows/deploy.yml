@@ -153,22 +153,25 @@ jobs:
           ssh -i ~/.ssh/azure_vm_rsa azureuser@${{ secrets.VM_IP }} << 'ENDSSH'
             set -e
 
-            # Wait for any existing apt/dpkg locks to release
+            # Wait for dpkg lock
             while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
-              echo "Waiting for dpkg lock to release..."
+              echo "Waiting for dpkg lock..."
               sleep 5
             done
-
-            # Also wait for unattended-upgrades to finish
             sudo systemctl stop unattended-upgrades 2>/dev/null || true
 
-            if ! node -v 2>/dev/null | grep -q "v20"; then
-              curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
-            fi
-            command -v pm2  &>/dev/null || sudo npm install -g pm2
+            # Remove old Node.js 12 and conflicting packages
+            sudo DEBIAN_FRONTEND=noninteractive apt-get remove -y nodejs libnode-dev libnode72 2>/dev/null || true
+            sudo DEBIAN_FRONTEND=noninteractive apt-get autoremove -y 2>/dev/null || true
+
+            # Install Node.js 20
+            curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
+
+            command -v pm2   &>/dev/null || sudo npm install -g pm2
             command -v nginx &>/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nginx
-            echo "Node: $(node -v) | PM2: $(pm2 -v)"
+
+            echo "Node: $(node -v) | NPM: $(npm -v) | PM2: $(pm2 -v)"
           ENDSSH
 
       - name: Install backend dependencies on VM
